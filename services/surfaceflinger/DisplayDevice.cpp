@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+/* Copyright (C) 2013 Freescale Semiconductor, Inc. */
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -97,6 +99,45 @@ DisplayDevice::DisplayDevice(
     int format;
     window->query(window, NATIVE_WINDOW_FORMAT, &format);
 
+#ifdef ENABLE_HWC_FOR_WFD
+    mBufferHandle = NULL;
+
+    if(type == DISPLAY_VIRTUAL)
+    {
+        int rel,*flags,fenceFd = -1;
+        ANativeWindowBuffer *buffer = NULL;
+
+        int usage = GRALLOC_USAGE_HW_RENDER
+              | GRALLOC_USAGE_HW_TEXTURE
+              | GRALLOC_USAGE_SW_READ_NEVER
+              | GRALLOC_USAGE_SW_WRITE_NEVER;
+
+        native_window_set_usage(window, usage);
+
+        rel = window->dequeueBuffer(window, &buffer, &fenceFd);
+
+        if (fenceFd != -1)
+        {
+            sync_wait(fenceFd, -1);
+            close(fenceFd);
+            fenceFd = -1;
+        }
+
+        if(rel != 0)
+        {
+            ALOGE(" Failed to dequeue virtual display buffer !\n");
+        }
+        else if(buffer)
+        {
+            mBufferHandle = (buffer_handle_t) buffer->handle;
+            flags = (int *)((int)mBufferHandle + sizeof(native_handle_t) + 8);
+            *flags |= 0x1;//mark PRIV_FLAGS_FRAMEBUFFER
+        }
+
+        window->cancelBuffer(window, buffer, fenceFd);
+    }
+#endif
+
     /*
      * Create our display's surface
      */
@@ -134,6 +175,19 @@ DisplayDevice::DisplayDevice(
 
     // initialize the display orientation transform.
     setProjection(DisplayState::eOrientationDefault, mViewport, mFrame);
+
+#ifdef EGL_ANDROID_swap_rectangle
+    if (eglSetSwapRectangleANDROID(display, surface,
+            0, 0, mDisplayWidth, mDisplayHeight) == EGL_TRUE) {
+        // This could fail if this extension is not supported by this
+        // specific surface (of config)
+        mFlags |= SWAP_RECTANGLE;
+    }
+    // when we have the choice between PARTIAL_UPDATES and SWAP_RECTANGLE
+    // choose PARTIAL_UPDATES, which should be more efficient
+    if (mFlags & PARTIAL_UPDATES)
+        mFlags &= ~SWAP_RECTANGLE;
+#endif
 }
 
 DisplayDevice::~DisplayDevice() {
@@ -207,6 +261,20 @@ void DisplayDevice::flip(const Region& dirty) const
 }
 
 void DisplayDevice::swapBuffers(HWComposer& hwc) const {
+
+#ifdef ENABLE_HWC_FOR_WFD
+    if(mBufferHandle)
+    {
+        // bypass overlay virtual display to 3D to do compostion.
+        if (!strncmp(mDisplayName, "Overlay", 7)) {
+            hwc.setFramebufferHandle(mHwcDisplayId, NULL);
+        }
+        else {
+            hwc.setFramebufferHandle(mHwcDisplayId, mBufferHandle);
+        }
+    }
+#endif
+
     // We need to call eglSwapBuffers() unless:
     // (a) there was no GLES composition this frame, or
     // (b) we're using a legacy HWC with no framebuffer target support (in

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+/* Copyright (C) 2013 Freescale Semiconductor, Inc. */
+
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
 #include <stdint.h>
@@ -64,6 +66,9 @@
 #include "Layer.h"
 #include "LayerDim.h"
 #include "SurfaceFlinger.h"
+#ifdef IMX5_PIXEL_FORMAT_FIXUP
+#include "pixelflinger/format.h"
+#endif
 
 #include "DisplayHardware/FramebufferSurface.h"
 #include "DisplayHardware/HWComposer.h"
@@ -97,6 +102,7 @@ SurfaceFlinger::SurfaceFlinger()
         mDebugRegion(0),
         mDebugDDMS(0),
         mDebugDisableHWC(0),
+        mDebugFps(0),
         mDebugDisableTransformHint(0),
         mDebugInSwapBuffers(0),
         mLastSwapBufferTime(0),
@@ -123,8 +129,13 @@ SurfaceFlinger::SurfaceFlinger()
             mDebugDDMS = 0;
         }
     }
+
+    property_get("debug.sf.showfps", value, "0");
+    mDebugFps = atoi(value);
+
     ALOGI_IF(mDebugRegion, "showupdates enabled");
     ALOGI_IF(mDebugDDMS, "DDMS debugging enabled");
+    ALOGI_IF(mDebugFps,  "showfps enabled");
 }
 
 void SurfaceFlinger::onFirstRef()
@@ -271,7 +282,14 @@ status_t SurfaceFlinger::selectConfigForAttribute(
             for (int i=0 ; i<n ; i++) {
                 EGLint value = 0;
                 eglGetConfigAttrib(dpy, configs[i], attribute, &value);
+
+#ifdef IMX5_PIXEL_FORMAT_FIXUP
+                if ((wanted == value) ||
+                    ((wanted == GGL_PIXEL_FORMAT_RGBX_8888) &&
+                     (value == GGL_PIXEL_FORMAT_RGBA_8888))) {
+#else
                 if (wanted == value) {
+#endif
                     *outConfig = configs[i];
                     delete [] configs;
                     return NO_ERROR;
@@ -991,6 +1009,24 @@ void SurfaceFlinger::doComposition() {
     postFramebuffer();
 }
 
+void SurfaceFlinger::debugShowFPS() const
+{
+    static int mFrameCount;
+    static int mLastFrameCount = 0;
+    static nsecs_t mLastFpsTime = 0;
+    static float mFps = 0;
+    mFrameCount++;
+    nsecs_t now = systemTime();
+    nsecs_t diff = now - mLastFpsTime;
+    if (diff > ms2ns(250)) {
+        mFps =  ((mFrameCount - mLastFrameCount) * float(s2ns(1))) / diff;
+        mLastFpsTime = now;
+        mLastFrameCount = mFrameCount;
+    }
+    // XXX: mFPS has the value we want
+    ALOGI("fps - %.2f",mFps);
+}
+
 void SurfaceFlinger::postFramebuffer()
 {
     ATRACE_CALL();
@@ -1031,6 +1067,10 @@ void SurfaceFlinger::postFramebuffer()
 
     mLastSwapBufferTime = systemTime() - now;
     mDebugInSwapBuffers = 0;
+
+    if (mDebugFps) {
+        debugShowFPS();
+    }
 }
 
 void SurfaceFlinger::handleTransaction(uint32_t transactionFlags)
@@ -1504,7 +1544,17 @@ void SurfaceFlinger::doDisplayComposition(const sp<const DisplayDevice>& hw,
         // we can redraw only what's dirty, but since SWAP_RECTANGLE only
         // takes a rectangle, we must make sure to update that whole
         // rectangle in that case
-        dirtyRegion.set(hw->swapRegion.bounds());
+        const int32_t id = hw->getHwcDisplayId();
+        HWComposer& hwc(getHwComposer());
+        HWComposer::LayerListIterator cur = hwc.begin(id);
+        const HWComposer::LayerListIterator end = hwc.end(id);
+
+        const bool hasGlesComposition = hwc.hasGlesComposition(id) || (cur==end);
+        if(hasGlesComposition) {//should draw the whole screen due to gpu3d limitation
+            dirtyRegion.set(hw->bounds());
+        }else {
+            dirtyRegion.set(hw->swapRegion.bounds());
+        }
     } else {
         if (flags & DisplayDevice::PARTIAL_UPDATES) {
             // We need to redraw the rectangle that will be updated
@@ -2710,7 +2760,8 @@ status_t SurfaceFlinger::captureScreen(const sp<IBinder>& display,
     if (isCpuConsumer) {
         bool formatSupportedBytBitmap =
                 (mEGLNativeVisualId == HAL_PIXEL_FORMAT_RGBA_8888) ||
-                (mEGLNativeVisualId == HAL_PIXEL_FORMAT_RGBX_8888);
+                (mEGLNativeVisualId == HAL_PIXEL_FORMAT_RGBX_8888) ||
+                (mEGLNativeVisualId == HAL_PIXEL_FORMAT_BGRA_8888);
         if (formatSupportedBytBitmap == false) {
             // the pixel format we have is not compatible with
             // Bitmap.java, which is the likely client of this API,
@@ -2856,10 +2907,12 @@ status_t SurfaceFlinger::captureScreenImplLocked(
         ALOGE("captureScreenImplLocked: eglSwapBuffers() failed 0x%4x",
                 eglGetError());
         eglDestroySurface(mEGLDisplay, eglSurface);
+        DisplayDevice::makeCurrent(mEGLDisplay, getDefaultDisplayDevice(), mEGLContext);
         return BAD_VALUE;
     }
 
     eglDestroySurface(mEGLDisplay, eglSurface);
+    DisplayDevice::makeCurrent(mEGLDisplay, getDefaultDisplayDevice(), mEGLContext);
 
     return NO_ERROR;
 }

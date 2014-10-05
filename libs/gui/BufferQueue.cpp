@@ -78,7 +78,7 @@ BufferQueue::BufferQueue(bool allowSynchronousMode,
     mBufferHasBeenQueued(false),
     mDefaultBufferFormat(PIXEL_FORMAT_RGBA_8888),
     mConsumerUsageBits(0),
-    mTransformHint(0)
+    mTransformHint(0), mFrameLost(0)
 {
     // Choose a name using the PID and a process-unique ID.
     mConsumerName = String8::format("unnamed-%d-%d", getpid(), createProcessUniqueId());
@@ -222,6 +222,9 @@ int BufferQueue::query(int what, int* outValue)
     case NATIVE_WINDOW_CONSUMER_RUNNING_BEHIND:
         value = (mQueue.size() >= 2);
         break;
+    case NATIVE_WINDOW_GET_FRAME_LOST:
+        value = mFrameLost;
+        break;
     default:
         return BAD_VALUE;
     }
@@ -338,7 +341,9 @@ status_t BufferQueue::dequeueBuffer(int *outBuf, sp<Fence>* outFence,
                 const int newUndequeuedCount = maxBufferCount - (dequeuedCount+1);
                 const int minUndequeuedCount = getMinUndequeuedBufferCountLocked();
                 if (newUndequeuedCount < minUndequeuedCount) {
-                    ST_LOGE("dequeueBuffer: min undequeued buffer count (%d) "
+                    //imx6 GPU always swap buffer in asynchronous mode, it will continue to degqueue when receive BUSY error
+                    //just change log level to remove warning
+                    ST_LOGV("dequeueBuffer: min undequeued buffer count (%d) "
                             "exceeded (dequeued=%d undequeudCount=%d)",
                             minUndequeuedCount, dequeuedCount,
                             newUndequeuedCount);
@@ -551,6 +556,7 @@ status_t BufferQueue::queueBuffer(int buf,
                 mSlots[*front].mBufferState = BufferSlot::FREE;
                 // and we record the new buffer index in the queued list
                 *front = buf;
+                mFrameLost ++;
             }
         }
 
@@ -907,6 +913,7 @@ status_t BufferQueue::consumerConnect(const sp<ConsumerListener>& consumerListen
     }
 
     mConsumerListener = consumerListener;
+    mFrameLost = 0;
 
     return NO_ERROR;
 }

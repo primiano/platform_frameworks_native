@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/* Copyright (C) 2013 Freescale Semiconductor, Inc. */
 
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
@@ -161,7 +162,11 @@ HWComposer::HWComposer(
             mNumDisplays = MAX_DISPLAYS;
         } else if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)) {
             // 1.1 adds support for multiple displays
+#ifdef ENABLE_HWC_FOR_WFD
+            mNumDisplays = MAX_DISPLAYS;
+#else
             mNumDisplays = NUM_PHYSICAL_DISPLAYS;
+#endif
         } else {
             mNumDisplays = 1;
         }
@@ -314,6 +319,7 @@ static const uint32_t DISPLAY_ATTRIBUTES[] = {
     HWC_DISPLAY_HEIGHT,
     HWC_DISPLAY_DPI_X,
     HWC_DISPLAY_DPI_Y,
+    HWC_DISPLAY_FORMAT,
     HWC_DISPLAY_NO_ATTRIBUTE,
 };
 #define NUM_DISPLAY_ATTRIBUTES (sizeof(DISPLAY_ATTRIBUTES) / sizeof(DISPLAY_ATTRIBUTES)[0])
@@ -360,6 +366,8 @@ status_t HWComposer::queryDisplayProperties(int disp) {
         case HWC_DISPLAY_DPI_Y:
             mDisplayData[disp].ydpi = values[i] / 1000.0f;
             break;
+        case HWC_DISPLAY_FORMAT:
+            mDisplayData[disp].format = values[i];
         default:
             ALOG_ASSERT(false, "unknown display attribute[%d] %#x",
                     i, DISPLAY_ATTRIBUTES[i]);
@@ -368,7 +376,11 @@ status_t HWComposer::queryDisplayProperties(int disp) {
     }
 
     // FIXME: what should we set the format to?
-    mDisplayData[disp].format = HAL_PIXEL_FORMAT_RGBA_8888;
+    if ((mDisplayData[disp].format != HAL_PIXEL_FORMAT_RGB_565) &&
+        (mDisplayData[disp].format != HAL_PIXEL_FORMAT_RGBA_8888) &&
+        (mDisplayData[disp].format != HAL_PIXEL_FORMAT_BGRA_8888))
+        mDisplayData[disp].format = HAL_PIXEL_FORMAT_RGBA_8888;
+
     mDisplayData[disp].connected = true;
     if (mDisplayData[disp].xdpi == 0.0f || mDisplayData[disp].ydpi == 0.0f) {
         float dpi = getDefaultDensity(h);
@@ -734,8 +746,9 @@ int HWComposer::getVisualID() const {
         // FIXME: temporary hack until HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED
         // is supported by the implementation. we can only be in this case
         // if we have HWC 1.1
-        return HAL_PIXEL_FORMAT_RGBA_8888;
+        //return HAL_PIXEL_FORMAT_RGBA_8888;
         //return HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;
+        return mDisplayData[0].format;
     } else {
         return mFbDev->format;
     }
@@ -754,6 +767,34 @@ int HWComposer::fbPost(int32_t id,
         return mFbDev->post(mFbDev, buffer->handle);
     }
 }
+
+#ifdef ENABLE_HWC_FOR_WFD
+int HWComposer::setFramebufferHandle(int32_t id, buffer_handle_t handle)
+{
+    if (mHwc && hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)) {
+        if (uint32_t(id)>31 || !mAllocatedDisplayIDs.hasBit(id)) {
+            return BAD_INDEX;
+        }
+
+        DisplayData& disp(mDisplayData[id]);
+        if (!disp.framebufferTarget) {
+          // this should never happen, but apparently eglCreateWindowSurface()
+          // triggers a Surface::queueBuffer()  on some
+          // devices (!?) -- log and ignore.
+          ALOGE("HWComposer: framebufferTarget is null");
+//        CallStack stack;
+//        stack.update();
+//        stack.dump("");
+          return NO_ERROR;
+        }
+
+        disp.fbTargetHandle = handle;
+        disp.framebufferTarget->handle = disp.fbTargetHandle;
+    }
+
+    return 0;
+}
+#endif
 
 int HWComposer::fbCompositionComplete() {
     if (mHwc && hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1))

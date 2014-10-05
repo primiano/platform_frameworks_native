@@ -15,6 +15,8 @@
 ** limitations under the License.
 */
 
+/* Copyright (C) 2013 Freescale Semiconductor, Inc. */
+
 #include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -53,6 +55,8 @@
 
 EGLBoolean EGLAPI eglSetSwapRectangleANDROID(EGLDisplay dpy, EGLSurface draw,
         EGLint left, EGLint top, EGLint width, EGLint height);
+EGLAPI EGLClientBuffer EGLAPIENTRY eglGetRenderBufferVIV(EGLClientBuffer handle);
+EGLAPI EGLBoolean EGLAPIENTRY eglPostBufferVIV(EGLClientBuffer handle);
 
 // ----------------------------------------------------------------------------
 namespace android {
@@ -167,6 +171,7 @@ struct egl_surface_t
     virtual     EGLint      getSwapBehavior() const;
     virtual     EGLBoolean  swapBuffers();
     virtual     EGLBoolean  setSwapRectangle(EGLint l, EGLint t, EGLint w, EGLint h);
+    virtual     EGLClientBuffer getRenderBuffer();
 protected:
     GGLSurface              depth;
 };
@@ -210,6 +215,9 @@ EGLBoolean egl_surface_t::setSwapRectangle(
 {
     return EGL_FALSE;
 }
+EGLClientBuffer egl_surface_t::getRenderBuffer() {
+    return 0;
+}
 
 // ----------------------------------------------------------------------------
 
@@ -235,6 +243,7 @@ struct egl_window_surface_v2_t : public egl_surface_t
     virtual     EGLint      getRefreshRate() const;
     virtual     EGLint      getSwapBehavior() const;
     virtual     EGLBoolean  setSwapRectangle(EGLint l, EGLint t, EGLint w, EGLint h);
+    virtual     EGLClientBuffer  getRenderBuffer();
     
 private:
     status_t lock(ANativeWindowBuffer* buf, int usage, void** vaddr);
@@ -581,6 +590,55 @@ EGLBoolean egl_window_surface_v2_t::setSwapRectangle(
     return EGL_TRUE;
 }
 
+EGLClientBuffer egl_window_surface_v2_t::getRenderBuffer()
+{
+    static int isCompositor = -1;
+
+    if (isCompositor < 0) {
+        // detect process name
+
+        char buf[64];
+        int fd = open("/proc/self/comm", O_RDONLY);
+        // should always have read permission
+        assert(fd > 0);
+        read(fd, buf, 64);
+        close(fd);
+
+        if (!strncmp("surfaceflinger", buf, 14)) {
+            isCompositor = true;
+        }
+        else {
+            isCompositor = false;
+        }
+    }
+
+    if (isCompositor) {
+        // If this function is called and this process is compositor
+        // we will remove oldDirtyRegion to avoid copyblt by software
+        // since copyblt (copy swaprect) is always done by hwcomposer
+        if (!dirtyRegion.isEmpty()) {
+            dirtyRegion.andSelf(Rect(buffer->width, buffer->height));
+            int32_t w, h;
+
+            *((int32_t *) &buffer->common.reserved[0]) =
+                (dirtyRegion.left << 16) | dirtyRegion.top;
+
+            w = dirtyRegion.right - dirtyRegion.left;
+            h = dirtyRegion.bottom - dirtyRegion.top;
+            *((int32_t *) &buffer->common.reserved[1]) =
+                (w << 16) | h;
+        } else {
+            *((int32_t *) &buffer->common.reserved[0]) = 0;
+            *((int32_t *) &buffer->common.reserved[1]) = 0;
+        }
+
+        oldDirtyRegion = dirtyRegion;
+    }
+
+    return buffer;
+}
+
+
 EGLBoolean egl_window_surface_v2_t::bindDrawSurface(ogles_context_t* gl)
 {
     GGLSurface buffer;
@@ -871,6 +929,10 @@ static const extention_map_t gExtentionMap[] = {
             (__eglMustCastToProperFunctionPointerType)&eglGetSyncAttribKHR },
     { "eglSetSwapRectangleANDROID", 
             (__eglMustCastToProperFunctionPointerType)&eglSetSwapRectangleANDROID }, 
+    { "eglGetRenderBufferVIV",
+            (__eglMustCastToProperFunctionPointerType)&eglGetRenderBufferVIV},
+    { "eglPostBufferVIV",
+            (__eglMustCastToProperFunctionPointerType)&eglPostBufferVIV},
 };
 
 /*
@@ -960,7 +1022,7 @@ static config_pair_t const config_3_attribute_list[] = {
         { EGL_SURFACE_TYPE,     EGL_WINDOW_BIT|EGL_PBUFFER_BIT|EGL_PIXMAP_BIT },
 };
 
-// 8888 configs
+// RGBA8888 configs
 static config_pair_t const config_4_attribute_list[] = {
         { EGL_BUFFER_SIZE,     32 },
         { EGL_ALPHA_SIZE,       8 },
@@ -1010,6 +1072,31 @@ static config_pair_t const config_7_attribute_list[] = {
         { EGL_SURFACE_TYPE,     EGL_WINDOW_BIT|EGL_PBUFFER_BIT|EGL_PIXMAP_BIT },
 };
 
+// BGRA8888 configs
+static config_pair_t const config_8_attribute_list[] = {
+        { EGL_BUFFER_SIZE,     32 },
+        { EGL_ALPHA_SIZE,       8 },
+        { EGL_RED_SIZE,         8 },
+        { EGL_GREEN_SIZE,       8 },
+        { EGL_BLUE_SIZE,        8 },
+        { EGL_DEPTH_SIZE,       0 },
+        { EGL_CONFIG_ID,        2 },
+        { EGL_NATIVE_VISUAL_ID, GGL_PIXEL_FORMAT_BGRA_8888 },
+        { EGL_SURFACE_TYPE,     EGL_WINDOW_BIT|EGL_PBUFFER_BIT|EGL_PIXMAP_BIT },
+};
+
+static config_pair_t const config_9_attribute_list[] = {
+        { EGL_BUFFER_SIZE,     32 },
+        { EGL_ALPHA_SIZE,       8 },
+        { EGL_RED_SIZE,         8 },
+        { EGL_GREEN_SIZE,       8 },
+        { EGL_BLUE_SIZE,        8 },
+        { EGL_DEPTH_SIZE,      16 },
+        { EGL_CONFIG_ID,        3 },
+        { EGL_NATIVE_VISUAL_ID, GGL_PIXEL_FORMAT_BGRA_8888 },
+        { EGL_SURFACE_TYPE,     EGL_WINDOW_BIT|EGL_PBUFFER_BIT|EGL_PIXMAP_BIT },
+};
+
 static configs_t const gConfigs[] = {
         { config_0_attribute_list, NELEM(config_0_attribute_list) },
         { config_1_attribute_list, NELEM(config_1_attribute_list) },
@@ -1019,6 +1106,8 @@ static configs_t const gConfigs[] = {
         { config_5_attribute_list, NELEM(config_5_attribute_list) },
         { config_6_attribute_list, NELEM(config_6_attribute_list) },
         { config_7_attribute_list, NELEM(config_7_attribute_list) },
+        { config_8_attribute_list, NELEM(config_8_attribute_list) },
+        { config_9_attribute_list, NELEM(config_9_attribute_list) },
 };
 
 static config_management_t const gConfigManagement[] = {
@@ -2054,6 +2143,16 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
         case HAL_PIXEL_FORMAT_RGBA_5551:
         case HAL_PIXEL_FORMAT_RGBA_4444:
             break;
+        //add YUV format support
+        case HAL_PIXEL_FORMAT_YV12:
+        case HAL_PIXEL_FORMAT_YCbCr_422_SP:
+        case HAL_PIXEL_FORMAT_YCrCb_420_SP:
+        case HAL_PIXEL_FORMAT_YCbCr_422_I:
+        case HAL_PIXEL_FORMAT_YCbCr_422_P:
+        case HAL_PIXEL_FORMAT_YCbCr_420_P:
+        case HAL_PIXEL_FORMAT_CbYCrY_422_I:
+        case HAL_PIXEL_FORMAT_YCbCr_420_SP:
+            break;
         default:
             return setError(EGL_BAD_PARAMETER, EGL_NO_IMAGE_KHR);
     }
@@ -2169,4 +2268,46 @@ EGLBoolean eglSetSwapRectangleANDROID(EGLDisplay dpy, EGLSurface draw,
     d->setSwapRectangle(left, top, width, height);
 
     return EGL_TRUE;
+}
+
+
+EGLClientBuffer eglGetRenderBufferVIV(EGLClientBuffer handle)
+{
+    EGLContext ctx = (EGLContext)getGlThreadSpecific();
+    if (ctx == EGL_NO_CONTEXT) return NULL;
+    egl_context_t* c = egl_context_t::context(ctx);
+    if (c->draw == NULL) return NULL;
+
+    egl_surface_t* d = static_cast<egl_surface_t*>(c->draw);
+    if (!d->isValid()) return NULL;
+
+    return d->getRenderBuffer();
+}
+
+EGLBoolean eglPostBufferVIV(EGLClientBuffer buffer)
+{
+    EGLBoolean result = EGL_TRUE;
+
+    EGLContext ctx = (EGLContext)getGlThreadSpecific();
+    if (ctx == EGL_NO_CONTEXT) return EGL_FALSE;
+    egl_context_t* c = egl_context_t::context(ctx);
+    if (c->draw == NULL) return EGL_FALSE;
+
+    egl_surface_t* d = static_cast<egl_surface_t*>(c->draw);
+    if (!d->isValid()) return EGL_FALSE;
+
+    if (d->getRenderBuffer() != buffer) {
+        ALOGE("%s: invalid buffer=%p", __FUNCTION__, buffer);
+        return EGL_FALSE;
+    }
+
+    result = d->swapBuffers();
+
+    // if it's bound to a context, update the buffer for 3D EGL context
+    if (d->ctx != EGL_NO_CONTEXT) {
+        d->bindDrawSurface((ogles_context_t*)d->ctx);
+        d->bindReadSurface((ogles_context_t*)d->ctx);
+    }
+
+    return result;
 }
